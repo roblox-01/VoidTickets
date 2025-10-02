@@ -8,7 +8,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.15.3",
+    "discord.js": "^13.16.1",
     "fs": "^0.0.1-security"
   },
   "author": "CryptX",
