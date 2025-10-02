@@ -19,7 +19,7 @@ function saveConfig(config) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
 }
 
-console.log('Void Tickets Setup');
+console.log('Void Tickets Setup - Run with node setup-guild.js');
 rl.question('Enter Bot Token: ', (botToken) => {
   rl.question('Enter Guild ID: ', (guildId) => {
     rl.question('Enter Staff Role ID: ', (staffRoleId) => {
