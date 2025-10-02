@@ -122,8 +122,12 @@ client.on('interactionCreate', async interaction => {
 
     ticket.claimedBy = interaction.user.id;
     const everyoneRole = interaction.guild.roles.everyone;
+    const highStaffRoles = config[ticket.guildId].highStaffRoles;
     await interaction.channel.permissionOverwrites.edit(everyoneRole, { ViewChannel: false });
     await interaction.channel.permissionOverwrites.edit(config[ticket.guildId].staffRoleId, { ViewChannel: false });
+    for (const roleId of Object.values(highStaffRoles).filter(id => id)) {
+      await interaction.channel.permissionOverwrites.edit(roleId, { ViewChannel: false });
+    }
     await interaction.channel.permissionOverwrites.edit(interaction.user.id, { ViewChannel: true, SendMessages: true });
     await interaction.channel.permissionOverwrites.edit(ticket.userId, { ViewChannel: true, SendMessages: true });
     await interaction.reply({ content: `Ticket claimed by ${interaction.user}. Only you and the ticket creator can see this now.`, ephemeral: true });
@@ -276,5 +280,10 @@ client.on('messageCreate', message => {
   }
 });
 
-const TOKEN = 'YOUR_BOT_TOKEN'; // Replace with your bot token
-client.login(TOKEN);
+const guildId = Object.keys(config)[0]; // Use the first configured guild
+if (guildId && config[guildId].botToken) {
+  client.login(config[guildId].botToken);
+} else {
+  console.error('No valid bot token found in config. Please run "npm run setup" first.');
+  process.exit(1);
+}
