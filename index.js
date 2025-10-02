@@ -1,12 +1,12 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, PermissionsBitField } = require('discord.js');
+const Discord = require('discord.js');
 const fs = require('fs');
 const { setTimeout } = require('timers/promises');
 
-const client = new Client({
+const client = new Discord.Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    Discord.Intents.FLAGS.GUILDS,
+    Discord.Intents.FLAGS.GUILD_MESSAGES,
+    Discord.Intents.FLAGS.GUILD_MESSAGE_REACTIONS
   ]
 });
 
@@ -17,7 +17,7 @@ function loadConfig() {
   if (fs.existsSync(CONFIG_FILE)) {
     return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   }
-  console.error('No configuration found. Please run "npm run setup" first.');
+  console.error('No configuration found. Please run "node setup-guild.js" first.');
   process.exit(1);
 }
 
@@ -42,24 +42,19 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    const category = interaction.guild.channels.cache.find(c => c.name === 'Void Tickets' && c.type === 4) ||
-      await interaction.guild.channels.create({
-        name: 'Void Tickets',
-        type: 4,
-        permissionOverwrites: [
-          { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] }
-        ]
-      });
+    const category = interaction.guild.channels.cache.find(c => c.name === 'Void Tickets' && c.type === 'category') ||
+      await interaction.guild.channels.create('Void Tickets', { type: 'category', permissionOverwrites: [
+        { id: interaction.guild.id, deny: ['VIEW_CHANNEL'] }
+      ]});
 
-    const channel = await interaction.guild.channels.create({
-      name: `void-ticket-${interaction.user.username}-${interaction.user.id % 10000}`,
-      type: 0,
+    const channel = await interaction.guild.channels.create(`void-ticket-${interaction.user.username}-${interaction.user.id % 10000}`, {
+      type: 'text',
       parent: category,
       permissionOverwrites: [
-        { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-        { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-        { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-        { id: config[guildId].staffRoleId, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+        { id: interaction.guild.id, deny: ['VIEW_CHANNEL'] },
+        { id: interaction.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] },
+        { id: client.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] },
+        { id: config[guildId].staffRoleId, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] }
       ]
     });
 
@@ -71,17 +66,17 @@ client.on('interactionCreate', async interaction => {
       claimedBy: null
     });
 
-    const embed = new EmbedBuilder()
+    const embed = new Discord.MessageEmbed()
       .setTitle('Void Tickets - General Support Ticket')
       .setDescription('Our staff will be with you shortly, please state your issue.')
-      .setColor(0x0066CC)
+      .setColor('#0066CC')
       .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' }); // Replace with your icon URL
-    const row = new ActionRowBuilder()
+    const row = new Discord.MessageActionRow()
       .addComponents(
-        new ButtonBuilder().setCustomId('close_void_ticket').setLabel('Close').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('claim_void_ticket').setLabel('Claim').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('request_help_void_ticket').setLabel('Call Management').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('get_void_transcript').setLabel('Transcript').setStyle(ButtonStyle.Secondary)
+        new Discord.MessageButton().setCustomId('close_void_ticket').setLabel('Close').setStyle('DANGER'),
+        new Discord.MessageButton().setCustomId('claim_void_ticket').setLabel('Claim').setStyle('PRIMARY'),
+        new Discord.MessageButton().setCustomId('request_help_void_ticket').setLabel('Call Management').setStyle('SECONDARY'),
+        new Discord.MessageButton().setCustomId('get_void_transcript').setLabel('Transcript').setStyle('SECONDARY')
       );
     await channel.send({ content: `${interaction.user} <@&${config[guildId].staffRoleId}>`, embeds: [embed], components: [row] });
 
@@ -123,13 +118,13 @@ client.on('interactionCreate', async interaction => {
     ticket.claimedBy = interaction.user.id;
     const everyoneRole = interaction.guild.roles.everyone;
     const highStaffRoles = config[ticket.guildId].highStaffRoles;
-    await interaction.channel.permissionOverwrites.edit(everyoneRole, { ViewChannel: false });
-    await interaction.channel.permissionOverwrites.edit(config[ticket.guildId].staffRoleId, { ViewChannel: false });
+    await interaction.channel.updateOverwrite(everyoneRole, { VIEW_CHANNEL: false });
+    await interaction.channel.updateOverwrite(config[ticket.guildId].staffRoleId, { VIEW_CHANNEL: false });
     for (const roleId of Object.values(highStaffRoles).filter(id => id)) {
-      await interaction.channel.permissionOverwrites.edit(roleId, { ViewChannel: false });
+      await interaction.channel.updateOverwrite(roleId, { VIEW_CHANNEL: false });
     }
-    await interaction.channel.permissionOverwrites.edit(interaction.user.id, { ViewChannel: true, SendMessages: true });
-    await interaction.channel.permissionOverwrites.edit(ticket.userId, { ViewChannel: true, SendMessages: true });
+    await interaction.channel.updateOverwrite(interaction.user.id, { VIEW_CHANNEL: true, SEND_MESSAGES: true });
+    await interaction.channel.updateOverwrite(ticket.userId, { VIEW_CHANNEL: true, SEND_MESSAGES: true });
     await interaction.reply({ content: `Ticket claimed by ${interaction.user}. Only you and the ticket creator can see this now.`, ephemeral: true });
   } else if (interaction.customId === 'request_help_void_ticket') {
     const ticket = activeTickets.get(interaction.channel.id);
@@ -138,13 +133,18 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    const view = new ManagementSelectionView(interaction.channel.id);
-    const embed = new EmbedBuilder()
+    const row = new Discord.MessageActionRow()
+      .addComponents(
+        new Discord.MessageButton().setCustomId('management_Chief of Operations').setLabel('Chief of Operations').setStyle('PRIMARY'),
+        new Discord.MessageButton().setCustomId('management_Co-Owner').setLabel('Co-Owner').setStyle('PRIMARY'),
+        new Discord.MessageButton().setCustomId('management_Owner').setLabel('Owner').setStyle('PRIMARY')
+      );
+    const embed = new Discord.MessageEmbed()
       .setTitle('Call Management System')
       .setDescription('Please pick which management staff you would like to call?')
-      .setColor(0x0066CC)
+      .setColor('#0066CC')
       .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' });
-    await interaction.reply({ embeds: [embed], components: [view], ephemeral: true });
+    await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
   } else if (interaction.customId === 'get_void_transcript') {
     const ticket = activeTickets.get(interaction.channel.id);
     if (!ticket) {
@@ -173,17 +173,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 });
-
-class ManagementSelectionView extends ActionRowBuilder {
-  constructor(channelId) {
-    super();
-    this.addComponents(
-      new ButtonBuilder().setCustomId('management_Chief of Operations').setLabel('Chief of Operations').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('management_Co-Owner').setLabel('Co-Owner').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('management_Owner').setLabel('Owner').setStyle(ButtonStyle.Primary)
-    );
-  }
-}
 
 async function generateHtmlTranscript(channel) {
   const transcriptPath = `transcript_${channel.id}.html`;
@@ -238,10 +227,10 @@ const autocloseTickets = {
           const channel = await client.channels.fetch(ticket.channelId);
           if (channel) {
             const transcriptPath = await generateHtmlTranscript(channel);
-            const embed = new EmbedBuilder()
+            const embed = new Discord.MessageEmbed()
               .setTitle('Ticket Auto-Closed')
               .setDescription('This ticket has been closed due to inactivity (6 hours). Transcript attached.')
-              .setColor(0xFFA500)
+              .setColor('#FFA500')
               .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' });
             await channel.send({ embeds: [embed], files: [transcriptPath] });
             fs.unlinkSync(transcriptPath);
@@ -284,6 +273,6 @@ const guildId = Object.keys(config)[0]; // Use the first configured guild
 if (guildId && config[guildId].botToken) {
   client.login(config[guildId].botToken);
 } else {
-  console.error('No valid bot token found in config. Please run "npm run setup" first.');
+  console.error('No valid bot token found in config. Please run "node setup-guild.js" first.');
   process.exit(1);
 }
