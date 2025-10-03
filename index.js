@@ -14,11 +14,19 @@ const CONFIG_FILE = 'config.json';
 let config = loadConfig();
 
 function loadConfig() {
-  if (fs.existsSync(CONFIG_FILE)) {
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+  if (!fs.existsSync(CONFIG_FILE)) {
+    console.error('No configuration found. Please run "node setup-guild.js" first.');
+    process.exit(1);
   }
-  console.error('No configuration found. Please run "node setup-guild.js" first.');
-  process.exit(1);
+  const configData = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+  // Validate config structure
+  for (const guildId of Object.keys(configData)) {
+    if (!configData[guildId].panelChannelId || !configData[guildId].staffRoleId) {
+      console.error(`Invalid config for guild ${guildId}: Missing panelChannelId or staffRoleId`);
+      process.exit(1);
+    }
+  }
+  return configData;
 }
 
 function saveConfig() {
@@ -31,19 +39,49 @@ const INACTIVITY_TIMEOUT = 21600; // 6 hours in seconds
 // ---------- Auto Panel Creation / Management ----------
 async function sendOrUpdatePanel(guildId) {
   const guildConfig = config[guildId];
-  if (!guildConfig || !guildConfig.panelChannelId) return;
+  if (!guildConfig || !guildConfig.panelChannelId) {
+    console.error(`No valid config or panelChannelId for guild ${guildId}`);
+    return;
+  }
 
   try {
-    const guild = await client.guilds.fetch(guildId);
-    const panelChannel = await guild.channels.fetch(guildConfig.panelChannelId);
-    if (!panelChannel) return;
+    const guild = await client.guilds.fetch(guildId).catch(err => {
+      console.error(`Failed to fetch guild ${guildId}:`, err);
+      return null;
+    });
+    if (!guild) return;
 
-    // Check if panel exists and still valid
+    // Fetch the panel channel
+    const panelChannel = await guild.channels.fetch(guildConfig.panelChannelId).catch(err => {
+      console.error(`Failed to fetch panel channel ${guildConfig.panelChannelId} for guild ${guildId}:`, err);
+      return null;
+    });
+    if (!panelChannel) {
+      console.error(`Channel ${guildConfig.panelChannelId} not found or inaccessible for guild ${guildId}`);
+      return;
+    }
+
+    // Verify bot permissions
+    const botMember = await guild.members.fetch(client.user.id).catch(err => {
+      console.error(`Failed to fetch bot member for guild ${guildId}:`, err);
+      return null;
+    });
+    if (!botMember) return;
+
+    const requiredPermissions = ['VIEW_CHANNEL', 'SEND_MESSAGES', 'EMBED_LINKS'];
+    const hasPermissions = panelChannel.permissionsFor(botMember).has(requiredPermissions);
+    if (!hasPermissions) {
+      console.error(`Bot lacks required permissions in channel ${panelChannel.id} for guild ${guildId}`);
+      return;
+    }
+
+    // Check if panel exists and is still valid
     let panelMessage;
     if (guildConfig.panelMessageId) {
       try {
         panelMessage = await panelChannel.messages.fetch(guildConfig.panelMessageId);
-      } catch {
+      } catch (err) {
+        console.warn(`Panel message ${guildConfig.panelMessageId} not found in channel ${panelChannel.id}, creating new one`);
         panelMessage = null;
       }
     }
@@ -52,7 +90,7 @@ async function sendOrUpdatePanel(guildId) {
       .setTitle('Void Tickets')
       .setDescription('Click the button below to open a new ticket.')
       .setColor('#0066CC')
-      .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' });
+      .setAuthor({ name: 'Void Tickets', iconURL: client.user.displayAvatarURL() || undefined });
 
     const row = new MessageActionRow()
       .addComponents(
@@ -63,16 +101,23 @@ async function sendOrUpdatePanel(guildId) {
       );
 
     if (!panelMessage) {
-      const message = await panelChannel.send({ embeds: [embed], components: [row] });
-      guildConfig.panelMessageId = message.id;
-      saveConfig();
-      console.log(`Panel created in guild ${guildId} in channel ${panelChannel.id}`);
+      const message = await panelChannel.send({ embeds: [embed], components: [row] }).catch(err => {
+        console.error(`Failed to send panel message in channel ${panelChannel.id}:`, err);
+        return null;
+      });
+      if (message) {
+        guildConfig.panelMessageId = message.id;
+        saveConfig();
+        console.log(`Panel created in guild ${guildId} in channel ${panelChannel.id}`);
+      }
     } else {
-      await panelMessage.edit({ embeds: [embed], components: [row] });
+      await panelMessage.edit({ embeds: [embed], components: [row] }).catch(err => {
+        console.error(`Failed to edit panel message ${panelMessage.id} in guild ${guildId}:`, err);
+      });
       console.log(`Panel updated in guild ${guildId}`);
     }
   } catch (err) {
-    console.error(`Failed to send/update panel for guild ${guildId}:`, err);
+    console.error(`Unexpected error in sendOrUpdatePanel for guild ${guildId}:`, err);
   }
 }
 
@@ -92,9 +137,12 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
-  const guildId = interaction.guild.id.toString();
+  const guildId = interaction.guild?.id?.toString();
   const guildConfig = config[guildId];
-  if (!guildConfig) return;
+  if (!guildConfig) {
+    await interaction.reply({ content: 'No configuration found for this guild.', ephemeral: true });
+    return;
+  }
 
   const userId = interaction.user.id;
 
@@ -106,25 +154,52 @@ client.on('interactionCreate', async interaction => {
     }
 
     // Determine category
-    let category = guildConfig.categoryId
-      ? interaction.guild.channels.cache.get(guildConfig.categoryId)
-      : interaction.guild.channels.cache.find(c => c.name === 'Void Tickets' && c.type === 'GUILD_CATEGORY');
+    let category;
+    if (guildConfig.categoryId) {
+      category = await interaction.guild.channels.fetch(guildConfig.categoryId).catch(err => {
+        console.error(`Failed to fetch category ${guildConfig.categoryId} for guild ${guildId}:`, err);
+        return null;
+      });
+    } else {
+      // Fetch all channels and find the "Void Tickets" category
+      const channels = await interaction.guild.channels.fetch().catch(err => {
+        console.error(`Failed to fetch channels for guild ${guildId}:`, err);
+        return new Map();
+      });
+      category = Array.from(channels.values()).find(c => c.name === 'Void Tickets' && c.type === 'GUILD_CATEGORY');
+    }
 
     if (!category) {
-      category = await interaction.guild.channels.create('Void Tickets', { type: 'GUILD_CATEGORY', permissionOverwrites: [{ id: interaction.guild.id, deny: ['VIEW_CHANNEL'] }] });
+      try {
+        category = await interaction.guild.channels.create('Void Tickets', {
+          type: 'GUILD_CATEGORY',
+          permissionOverwrites: [{ id: interaction.guild.id, deny: ['VIEW_CHANNEL'] }]
+        });
+      } catch (err) {
+        console.error(`Failed to create category for guild ${guildId}:`, err);
+        await interaction.reply({ content: 'Failed to create ticket category. Please contact an admin.', ephemeral: true });
+        return;
+      }
     }
 
     const channelName = `${guildConfig.channelPrefix || 'ticket-'}${interaction.user.username}-${userId % 10000}`;
-    const channel = await interaction.guild.channels.create(channelName, {
-      type: 'GUILD_TEXT',
-      parent: category,
-      permissionOverwrites: [
-        { id: interaction.guild.id, deny: ['VIEW_CHANNEL'] },
-        { id: userId, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] },
-        { id: client.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] },
-        { id: guildConfig.staffRoleId, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] }
-      ]
-    });
+    let channel;
+    try {
+      channel = await interaction.guild.channels.create(channelName, {
+        type: 'GUILD_TEXT',
+        parent: category,
+        permissionOverwrites: [
+          { id: interaction.guild.id, deny: ['VIEW_CHANNEL'] },
+          { id: userId, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] },
+          { id: client.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] },
+          { id: guildConfig.staffRoleId, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] }
+        ]
+      });
+    } catch (err) {
+      console.error(`Failed to create ticket channel for user ${userId} in guild ${guildId}:`, err);
+      await interaction.reply({ content: 'Failed to create ticket channel. Please contact an admin.', ephemeral: true });
+      return;
+    }
 
     activeTickets.set(userId, { channelId: channel.id, guildId, userId, lastActivity: Date.now(), claimedBy: null });
 
@@ -132,7 +207,7 @@ client.on('interactionCreate', async interaction => {
       .setTitle(`Void Tickets - Support Ticket`)
       .setDescription('Our staff will be with you shortly, please state your issue.')
       .setColor('#0066CC')
-      .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' });
+      .setAuthor({ name: 'Void Tickets', iconURL: client.user.displayAvatarURL() || undefined });
 
     const row = new MessageActionRow()
       .addComponents(
@@ -142,7 +217,9 @@ client.on('interactionCreate', async interaction => {
         new MessageButton().setCustomId('get_void_transcript').setLabel('Transcript').setStyle('SECONDARY')
       );
 
-    await channel.send({ content: `<@${userId}> <@&${guildConfig.staffRoleId}>`, embeds: [embed], components: [row] });
+    await channel.send({ content: `<@${userId}> <@&${guildConfig.staffRoleId}>`, embeds: [embed], components: [row] }).catch(err => {
+      console.error(`Failed to send initial ticket message in channel ${channel.id}:`, err);
+    });
 
     if (guildConfig.logChannelId) {
       const logChannel = await client.channels.fetch(guildConfig.logChannelId).catch(() => null);
@@ -156,7 +233,19 @@ client.on('interactionCreate', async interaction => {
   else if (interaction.customId === 'close_void_ticket') {
     const ticket = activeTickets.get(interaction.channel.id) || Object.values(activeTickets).find(t => t.channelId === interaction.channel.id);
     if (!ticket) return interaction.reply({ content: 'No ticket data found.', ephemeral: true });
-    if (!interaction.member.roles.cache.has(guildConfig.staffRoleId)) return interaction.reply({ content: 'Only staff can close tickets.', ephemeral: true });
+
+    // Fetch member roles to check for staff role
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(err => {
+      console.error(`Failed to fetch member ${interaction.user.id} in guild ${guildId}:`, err);
+      return null;
+    });
+    if (!member) return interaction.reply({ content: 'Failed to fetch member data.', ephemeral: true });
+
+    const roles = await member.roles.fetch().catch(err => {
+      console.error(`Failed to fetch roles for member ${interaction.user.id}:`, err);
+      return new Map();
+    });
+    if (!roles.has(guildConfig.staffRoleId)) return interaction.reply({ content: 'Only staff can close tickets.', ephemeral: true });
 
     await interaction.deferReply();
     const transcriptPath = await generateHtmlTranscript(interaction.channel);
@@ -177,13 +266,30 @@ client.on('interactionCreate', async interaction => {
   else if (interaction.customId === 'claim_void_ticket') {
     const ticket = activeTickets.get(interaction.channel.id) || Object.values(activeTickets).find(t => t.channelId === interaction.channel.id);
     if (!ticket) return;
-    if (!interaction.member.roles.cache.has(guildConfig.staffRoleId)) return interaction.reply({ content: 'Only staff can claim tickets.', ephemeral: true });
+
+    // Fetch member roles to check for staff role
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(err => {
+      console.error(`Failed to fetch member ${interaction.user.id} in guild ${guildId}:`, err);
+      return null;
+    });
+    if (!member) return interaction.reply({ content: 'Failed to fetch member data.', ephemeral: true });
+
+    const roles = await member.roles.fetch().catch(err => {
+      console.error(`Failed to fetch roles for member ${interaction.user.id}:`, err);
+      return new Map();
+    });
+    if (!roles.has(guildConfig.staffRoleId)) return interaction.reply({ content: 'Only staff can claim tickets.', ephemeral: true });
 
     ticket.claimedBy = interaction.user.id;
     const newChannelName = `${guildConfig.channelPrefix || 'ticket-'}claimed-${interaction.user.username}-${ticket.userId % 10000}`;
     await interaction.channel.setName(newChannelName);
 
-    const everyoneRole = interaction.guild.roles.everyone;
+    const everyoneRole = await interaction.guild.roles.fetch(interaction.guild.id).catch(err => {
+      console.error(`Failed to fetch everyone role for guild ${guildId}:`, err);
+      return null;
+    });
+    if (!everyoneRole) return interaction.reply({ content: 'Failed to fetch everyone role.', ephemeral: true });
+
     await interaction.channel.permissionOverwrites.set([
       { id: everyoneRole.id, deny: ['VIEW_CHANNEL'] },
       { id: guildConfig.staffRoleId, deny: ['VIEW_CHANNEL'] },
@@ -210,7 +316,7 @@ client.on('interactionCreate', async interaction => {
       .setTitle('Call Management System')
       .setDescription('Select which management staff to call.')
       .setColor('#0066CC')
-      .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' });
+      .setAuthor({ name: 'Void Tickets', iconURL: client.user.displayAvatarURL() || undefined });
 
     await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
   }
@@ -232,15 +338,20 @@ client.on('interactionCreate', async interaction => {
     if (!ticket) return;
 
     const roleName = interaction.customId.split('_')[1];
-    const roleId = guildConfig.highStaffRoles[roleName];
+    const roleId = guildConfig.highStaffRoles?.[roleName];
     if (roleId) {
-      const role = interaction.guild.roles.cache.get(roleId);
+      const role = await interaction.guild.roles.fetch(roleId).catch(err => {
+        console.error(`Failed to fetch role ${roleId} in guild ${guildId}:`, err);
+        return null;
+      });
       if (role) {
         await interaction.channel.send(`${role} has been called for assistance.`);
         await interaction.update({ content: `Requested ${roleName} assistance.`, components: [] });
       } else {
         await interaction.update({ content: `Role ${roleName} not found.`, components: [] });
       }
+    } else {
+      await interaction.update({ content: `No role ID configured for ${roleName}.`, components: [] });
     }
   }
 });
@@ -261,7 +372,7 @@ const autocloseTickets = {
             .setTitle('Ticket Auto-Closed')
             .setDescription('This ticket has been closed due to inactivity (6 hours). Transcript attached.')
             .setColor('#FFA500')
-            .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' });
+            .setAuthor({ name: 'Void Tickets', iconURL: client.user.displayAvatarURL() || undefined });
 
           await channel.send({ embeds: [embed], files: [transcriptPath] });
           fs.unlinkSync(transcriptPath);
@@ -327,7 +438,10 @@ async function generateHtmlTranscript(channel) {
 // ---------- Login ----------
 const firstGuildId = Object.keys(config)[0];
 if (firstGuildId && config[firstGuildId].botToken) {
-  client.login(config[firstGuildId].botToken);
+  client.login(config[firstGuildId].botToken).catch(err => {
+    console.error('Failed to login with bot token:', err);
+    process.exit(1);
+  });
 } else {
   console.error('No valid bot token found in config. Please run "node setup-guild.js" first.');
   process.exit(1);
