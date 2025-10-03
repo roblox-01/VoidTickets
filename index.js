@@ -26,15 +26,37 @@ const activeTickets = new Map();
 const INACTIVITY_TIMEOUT = 21600; // 6 hours in seconds
 
 client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag}!`);
+  console.log(`Logged in as ${client.user.tag}! Multi-server mode enabled for ${Object.keys(config).length} guilds.`);
+  // Auto-send ticket panels to configured channels for each guild
+  Object.keys(config).forEach(guildId => {
+    const guildConfig = config[guildId];
+    const guild = client.guilds.cache.get(guildId);
+    if (guild && guildConfig.panelChannelId) {
+      const panelChannel = guild.channels.cache.get(guildConfig.panelChannelId);
+      if (panelChannel) {
+        const embed = new Discord.MessageEmbed()
+          .setTitle('Void Tickets')
+          .setDescription('Click the button below to open a new ticket.')
+          .setColor('#0066CC')
+          .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' }); // Replace with your icon URL
+        const row = new Discord.MessageActionRow()
+          .addComponents(
+            new Discord.MessageButton().setCustomId('open_void_ticket').setLabel('Open Ticket').setStyle('PRIMARY')
+          );
+        panelChannel.send({ embeds: [embed], components: [row] }).catch(console.error);
+        console.log(`Auto-sent ticket panel to channel ${panelChannelId} in guild ${guildId}`);
+      }
+    }
+  });
   autocloseTickets.start();
 });
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
 
-  const guildId = interaction.guild.id;
-  if (!config[guildId]) return;
+  const guildId = interaction.guild.id.toString();
+  const guildConfig = config[guildId];
+  if (!guildConfig) return;
 
   if (interaction.customId === 'open_void_ticket') {
     if (activeTickets.has(interaction.user.id)) {
@@ -42,19 +64,23 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    const category = interaction.guild.channels.cache.find(c => c.name === 'Void Tickets' && c.type === 'category') ||
-      await interaction.guild.channels.create('Void Tickets', { type: 'category', permissionOverwrites: [
+    const category = guildConfig.categoryId ? interaction.guild.channels.cache.get(guildConfig.categoryId) : 
+      interaction.guild.channels.cache.find(c => c.name === 'Void Tickets' && c.type === 'category');
+    if (!category) {
+      category = await interaction.guild.channels.create('Void Tickets', { type: 'category', permissionOverwrites: [
         { id: interaction.guild.id, deny: ['VIEW_CHANNEL'] }
       ]});
+    }
 
-    const channel = await interaction.guild.channels.create(`void-ticket-${interaction.user.username}-${interaction.user.id % 10000}`, {
+    const channelName = `${guildConfig.channelPrefix}${interaction.user.username}-${interaction.user.id % 10000}`;
+    const channel = await interaction.guild.channels.create(channelName, {
       type: 'text',
       parent: category,
       permissionOverwrites: [
         { id: interaction.guild.id, deny: ['VIEW_CHANNEL'] },
         { id: interaction.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] },
         { id: client.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] },
-        { id: config[guildId].staffRoleId, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] }
+        { id: guildConfig.staffRoleId, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES'] }
       ]
     });
 
@@ -67,10 +93,10 @@ client.on('interactionCreate', async interaction => {
     });
 
     const embed = new Discord.MessageEmbed()
-      .setTitle('Void Tickets - General Support Ticket')
+      .setTitle(`Void Tickets - General Support Ticket`)
       .setDescription('Our staff will be with you shortly, please state your issue.')
       .setColor('#0066CC')
-      .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' }); // Replace with your icon URL
+      .setAuthor({ name: 'Void Tickets', iconURL: 'https://i.imgur.com/placeholder_icon.png' });
     const row = new Discord.MessageActionRow()
       .addComponents(
         new Discord.MessageButton().setCustomId('close_void_ticket').setLabel('Close').setStyle('DANGER'),
@@ -78,9 +104,9 @@ client.on('interactionCreate', async interaction => {
         new Discord.MessageButton().setCustomId('request_help_void_ticket').setLabel('Call Management').setStyle('SECONDARY'),
         new Discord.MessageButton().setCustomId('get_void_transcript').setLabel('Transcript').setStyle('SECONDARY')
       );
-    await channel.send({ content: `${interaction.user} <@&${config[guildId].staffRoleId}>`, embeds: [embed], components: [row] });
+    await channel.send({ content: `${interaction.user} <@&${guildConfig.staffRoleId}>`, embeds: [embed], components: [row] });
 
-    const logChannelId = config[guildId].logChannelId;
+    const logChannelId = guildConfig.logChannelId;
     if (logChannelId) {
       const logChannel = await client.channels.fetch(logChannelId);
       if (logChannel) await logChannel.send(`Ticket created: <#${channel.id}> by ${interaction.user}`);
@@ -89,7 +115,7 @@ client.on('interactionCreate', async interaction => {
     await interaction.reply({ content: `Your ticket has been created: <#${channel.id}>`, ephemeral: true });
   } else if (interaction.customId === 'close_void_ticket') {
     const ticket = activeTickets.get(interaction.channel.id);
-    if (!ticket || !interaction.member.roles.cache.has(config[ticket.guildId].staffRoleId)) {
+    if (!ticket || !interaction.member.roles.cache.has(guildConfig.staffRoleId)) {
       await interaction.reply({ content: 'Only staff can close tickets.', ephemeral: true });
       return;
     }
@@ -99,7 +125,7 @@ client.on('interactionCreate', async interaction => {
     await interaction.followUp({ content: 'Ticket closing in 10 seconds... Transcript attached.', files: [transcriptPath] });
     fs.unlinkSync(transcriptPath);
 
-    const logChannelId = config[ticket.guildId].logChannelId;
+    const logChannelId = guildConfig.logChannelId;
     if (logChannelId) {
       const logChannel = await client.channels.fetch(logChannelId);
       if (logChannel) await logChannel.send(`Ticket closed: <#${interaction.channel.id}> by ${interaction.user} (user: <@${ticket.userId}>)`);
@@ -110,22 +136,25 @@ client.on('interactionCreate', async interaction => {
     await interaction.channel.delete();
   } else if (interaction.customId === 'claim_void_ticket') {
     const ticket = activeTickets.get(interaction.channel.id);
-    if (!ticket || !interaction.member.roles.cache.has(config[ticket.guildId].staffRoleId)) {
+    if (!ticket || !interaction.member.roles.cache.has(guildConfig.staffRoleId)) {
       await interaction.reply({ content: 'Only staff can claim tickets.', ephemeral: true });
       return;
     }
 
     ticket.claimedBy = interaction.user.id;
+    const newChannelName = `${guildConfig.channelPrefix}claimed-${interaction.user.username}-${ticket.userId % 10000}`; // Change name only on claim
+    await interaction.channel.setName(newChannelName);
+
     const everyoneRole = interaction.guild.roles.everyone;
-    const highStaffRoles = config[ticket.guildId].highStaffRoles;
+    const highStaffRoles = guildConfig.highStaffRoles;
     await interaction.channel.updateOverwrite(everyoneRole, { VIEW_CHANNEL: false });
-    await interaction.channel.updateOverwrite(config[ticket.guildId].staffRoleId, { VIEW_CHANNEL: false });
+    await interaction.channel.updateOverwrite(guildConfig.staffRoleId, { VIEW_CHANNEL: false });
     for (const roleId of Object.values(highStaffRoles).filter(id => id)) {
       await interaction.channel.updateOverwrite(roleId, { VIEW_CHANNEL: false });
     }
     await interaction.channel.updateOverwrite(interaction.user.id, { VIEW_CHANNEL: true, SEND_MESSAGES: true });
     await interaction.channel.updateOverwrite(ticket.userId, { VIEW_CHANNEL: true, SEND_MESSAGES: true });
-    await interaction.reply({ content: `Ticket claimed by ${interaction.user}. Only you and the ticket creator can see this now.`, ephemeral: true });
+    await interaction.reply({ content: `Ticket claimed by ${interaction.user}. Channel renamed and restricted to you and the creator.`, ephemeral: true });
   } else if (interaction.customId === 'request_help_void_ticket') {
     const ticket = activeTickets.get(interaction.channel.id);
     if (!ticket) {
@@ -161,7 +190,7 @@ client.on('interactionCreate', async interaction => {
     if (!ticket) return;
 
     const roleName = interaction.customId.split('_')[1];
-    const roleId = config[ticket.guildId].highStaffRoles[roleName];
+    const roleId = guildConfig.highStaffRoles[roleName];
     if (roleId) {
       const role = interaction.guild.roles.cache.get(roleId);
       if (role) {
@@ -269,9 +298,10 @@ client.on('messageCreate', message => {
   }
 });
 
-const guildId = Object.keys(config)[0]; // Use the first configured guild
-if (guildId && config[guildId].botToken) {
-  client.login(config[guildId].botToken);
+// Login with shared token from first guild config
+const firstGuildId = Object.keys(config)[0];
+if (firstGuildId && config[firstGuildId].botToken) {
+  client.login(config[firstGuildId].botToken);
 } else {
   console.error('No valid bot token found in config. Please run "node setup-guild.js" first.');
   process.exit(1);
