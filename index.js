@@ -195,6 +195,7 @@ async function sendOrUpdatePanel(guildId) {
       .setColor('#FFD700')
       .setAuthor({ name: guild.name, iconURL: guild.iconURL() || client.user.displayAvatarURL() })
       .setThumbnail(guild.iconURL() || client.user.displayAvatarURL())
+      .setImage(guild.bannerURL ? guild.bannerURL() : null)
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
 
@@ -245,6 +246,7 @@ async function sendOrUpdatePanel(guildId) {
       .addField('Guild', guild.name, true)
       .setColor('#00BFFF')
       .setThumbnail(guild.iconURL() || client.user.displayAvatarURL())
+      .setImage(guild.bannerURL ? guild.bannerURL() : null)
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
     await panelChannel.send({ embeds: [welcomeEmbed] }).catch(err => {
@@ -260,7 +262,7 @@ client.once('ready', async () => {
   logger.info(`🚀 Logged in as ${client.user.tag}!`);
   // Validate intents
   const requiredIntents = ['GUILDS', 'GUILD_MESSAGES', 'GUILD_MESSAGE_REACTIONS'];
-  const missingIntents = requiredIntents.filter(intent => !client.options.intents.has(intent));
+  const missingIntents = requiredIntents.filter(intent => !client.options.intents.has(Intents.FLAGS[intent]));
   if (missingIntents.length > 0) {
     logger.error(`Missing required intents: ${missingIntents.join(', ')}`);
     process.exit(1);
