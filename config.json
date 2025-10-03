@@ -1,0 +1,17 @@
+{
+  "1418399854216089705": {
+    "botToken": "FAKEASSTOKENMTQwODI1NDA1MjYyMTQ4NDIyNA.GfTR8I.geRpLOqOona9Xm47EOvcZ8xzNtXv-kevBpRxGA)()(",
+    "staffRoleId": 1422446765445087200,
+    "channelPrefix": "ticket-",
+    "categoryId": null,
+    "panelChannelId": 1423528093695606800,
+    "logChannelId": null,
+    "highStaffRoles": {
+      "Chief of Operations": 1422446765445087200,
+      "Co-Owner": 1422446765445087200,
+      "Owner": 1422446765445087200
+    },
+    "logServerId": null,
+    "autoCloseTimeout": 60
+  }
+}
