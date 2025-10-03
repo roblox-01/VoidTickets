@@ -1,16 +1,44 @@
 {
   "name": "void-tickets",
   "version": "1.0.0",
-  "description": "A Discord ticket bot named Void Tickets",
+  "description": "Void Tickets: A sleek and powerful Discord ticket bot for streamlined support and management",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "setup": "node setup-guild.js",
-    "start": "node index.js"
+    "lint": "eslint . --ext .js",
+    "format": "prettier --write .",
+    "test": "echo \"No tests specified\" && exit 0",
+    "deps:check": "npm outdated",
+    "deps:update": "npm update"
   },
   "dependencies": {
-    "discord.js": "^13.16.1",
-    "fs": "^0.0.1-security"
+    "discord.js": "^13.17.0",
+    "chalk": "^5.3.0",
+    "winston": "^3.14.2"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3"
+  },
+  "engines": {
+    "node": ">=22.2.0"
   },
   "author": "CryptX",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CryptX/void-tickets.git"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "tickets",
+    "support",
+    "automation"
+  ],
+  "bugs": {
+    "url": "https://github.com/CryptX/void-tickets/issues"
+  },
+  "homepage": "https://github.com/CryptX/void-tickets#readme"
 }
