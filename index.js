@@ -28,10 +28,14 @@ async function loadConfig() {
         logger.error(`Invalid config for guild ${guildId}: Missing panelChannelId or staffRoleId`);
         process.exit(1);
       }
+      if (!configData[guildId].botToken) {
+        logger.error(`Invalid config for guild ${guildId}: Missing botToken`);
+        process.exit(1);
+      }
     }
     return configData;
   } catch (err) {
-    logger.error(`Error reading ${CONFIG_FILE}: ${err.message}`);
+    logger.error(`Error reading ${CONFIG_FILE}: ${err.message}. Run "npm run setup" to generate a valid config.`);
     process.exit(1);
   }
 }
@@ -45,6 +49,18 @@ async function saveConfig(configData) {
   }
 }
 
+async function validateToken(token) {
+  try {
+    const tempClient = new Client({ intents: [Intents.FLAGS.GUILDS] });
+    await tempClient.login(token);
+    await tempClient.destroy();
+    return true;
+  } catch (err) {
+    logger.error(`Token validation failed: ${err.message}`);
+    return false;
+  }
+}
+
 const client = new Client({
   intents: [
     Intents.FLAGS.GUILDS,
@@ -54,12 +70,6 @@ const client = new Client({
 });
 
 const activeTickets = new Map();
-
-// Load config after logger initialization
-let config;
-(async () => {
-  config = await loadConfig();
-})();
 
 // ---------- Auto Panel Creation / Management ----------
 async function sendOrUpdatePanel(guildId) {
@@ -173,20 +183,38 @@ async function sendOrUpdatePanel(guildId) {
     }
 
     // Check for custom emoji
-    const openEmoji = guild.emojis.cache.find(e => e.name.toLowerCase().includes('ticket')) || '🛠️';
-    const faqEmoji = guild.emojis.cache.find(e => e.name.toLowerCase().includes('faq')) || '❓';
+    const openEmoji = guild.emojis.cache.find(e => e.name.toLowerCase().includes('ticket') && e.available) || '🛠️';
+    const faqEmoji = guild.emojis.cache.find(e => e.name.toLowerCase().includes('faq') && e.available) || '❓';
 
     const embed = new MessageEmbed()
       .setTitle('🎟️ Void Tickets Support')
-      .setDescription('Need help? Click **Open Ticket** to start a support session! 📩')
-      .addField('Status', '🟢 Online', true)
+      .setDescription('Need help? Click **Open Ticket** to start a support session! 📩\n\n*Initializing...*')
+      .addField('Status', '🟡 Initializing', true)
       .addField('Support Team', `<@&${guildConfig.staffRoleId}>`, true)
       .addField('Active Tickets', activeTickets.size.toString(), true)
-      .setColor('#00BFFF')
+      .setColor('#FFD700')
       .setAuthor({ name: guild.name, iconURL: guild.iconURL() || client.user.displayAvatarURL() })
       .setThumbnail(guild.iconURL() || client.user.displayAvatarURL())
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
+
+    let message;
+    if (!panelMessage) {
+      message = await panelChannel.send({ embeds: [embed], components: [] }).catch(err => {
+        logger.error(`Failed to send panel message in channel ${panelChannel.id}: ${err.message}`);
+        return null;
+      });
+      if (!message) return;
+      guildConfig.panelMessageId = message.id;
+      await saveConfig(config);
+    } else {
+      message = panelMessage;
+    }
+
+    // Update embed to online status
+    embed.setDescription('Need help? Click **Open Ticket** to start a support session! 📩')
+      .setField(0, { name: 'Status', value: '🟢 Online', inline: true })
+      .setColor('#00BFFF');
 
     const row = new MessageActionRow()
       .addComponents(
@@ -202,22 +230,10 @@ async function sendOrUpdatePanel(guildId) {
           .setStyle('SECONDARY')
       );
 
-    if (!panelMessage) {
-      const message = await panelChannel.send({ embeds: [embed], components: [row] }).catch(err => {
-        logger.error(`Failed to send panel message in channel ${panelChannel.id}: ${err.message}`);
-        return null;
-      });
-      if (message) {
-        guildConfig.panelMessageId = message.id;
-        await saveConfig(config);
-        logger.info(`Panel created in guild ${guildId} in channel ${panelChannel.id}`);
-      }
-    } else {
-      await panelMessage.edit({ embeds: [embed], components: [row] }).catch(err => {
-        logger.error(`Failed to edit panel message ${panelMessage.id}: ${err.message}`);
-      });
-      logger.info(`Panel updated in guild ${guildId}`);
-    }
+    await message.edit({ embeds: [embed], components: [row] }).catch(err => {
+      logger.error(`Failed to edit panel message ${message.id}: ${err.message}`);
+    });
+    logger.info(`Panel ${panelMessage ? 'updated' : 'created'} in guild ${guildId} in channel ${panelChannel.id}`);
 
     // Send welcome message
     const uptime = Math.floor((Date.now() - startTime) / 1000);
@@ -270,6 +286,11 @@ client.once('ready', async () => {
     {
       name: 'reset-panel',
       description: 'Reset and recreate the panel channel (staff only)',
+      defaultPermission: false
+    },
+    {
+      name: 'validate-config',
+      description: 'Validate the bot configuration (staff only)',
       defaultPermission: false
     }
   ];
@@ -363,6 +384,23 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `❌ Failed to reset panel channel: ${err.message}`, ephemeral: true });
         logger.error(`Failed to reset panel channel in guild ${interaction.guild.id}: ${err.message}`);
       }
+    } else if (interaction.commandName === 'validate-config') {
+      const isTokenValid = await validateToken(guildConfig.botToken);
+      const channels = await interaction.guild.channels.fetch().catch(() => new Map());
+      const channelExists = channels.has(guildConfig.panelChannelId);
+      const roleExists = await interaction.guild.roles.fetch(guildConfig.staffRoleId).catch(() => null);
+
+      const embed = new MessageEmbed()
+        .setTitle('🔍 Config Validation')
+        .setDescription('Validation results for Void Tickets configuration.')
+        .addField('Bot Token', isTokenValid ? '✅ Valid' : '❌ Invalid', true)
+        .addField('Panel Channel', channelExists ? '✅ Exists' : '❌ Not found', true)
+        .addField('Staff Role', roleExists ? '✅ Exists' : '❌ Not found', true)
+        .setColor(isTokenValid && channelExists && roleExists ? '#00BFFF' : '#FF4500')
+        .setThumbnail(interaction.guild.iconURL() || client.user.displayAvatarURL())
+        .setTimestamp();
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      logger.info(`Config validated by ${interaction.user.tag} in guild ${interaction.guild.id}`);
     }
     return;
   }
@@ -429,7 +467,7 @@ client.on('interactionCreate', async interaction => {
 
     activeTickets.set(userId, { channelId: channel.id, guildId, userId, lastActivity: Date.now(), claimedBy: null });
 
-    const ticketEmoji = interaction.guild.emojis.cache.find(e => e.name.toLowerCase().includes('ticket')) || '🎟️';
+    const ticketEmoji = interaction.guild.emojis.cache.find(e => e.name.toLowerCase().includes('ticket') && e.available) || '🎟️';
     const embed = new MessageEmbed()
       .setTitle(`${ticketEmoji} Void Tickets - Support Ticket`)
       .setDescription(`Welcome, <@${userId}>! Our staff will assist you soon.`)
@@ -668,16 +706,25 @@ async function generateHtmlTranscript(channel) {
 // ---------- Login ----------
 (async () => {
   try {
-    await config; // Ensure config is loaded
+    config = await loadConfig();
     const firstGuildId = Object.keys(config)[0];
-    if (firstGuildId && config[firstGuildId].botToken) {
-      await client.login(config[firstGuildId].botToken);
-    } else {
-      logger.error('No valid bot token found in config. Please run "npm run setup" first.');
+    if (!firstGuildId) {
+      logger.error('No guilds found in config. Run "npm run setup" to generate a valid config.');
       process.exit(1);
     }
+    const botToken = config[firstGuildId].botToken;
+    if (!botToken) {
+      logger.error(`No botToken found for guild ${firstGuildId}. Run "npm run setup" to update config.`);
+      process.exit(1);
+    }
+    const isTokenValid = await validateToken(botToken);
+    if (!isTokenValid) {
+      logger.error(`Invalid bot token for guild ${firstGuildId}. Run "npm run setup" to update token.`);
+      process.exit(1);
+    }
+    await client.login(botToken);
   } catch (err) {
-    logger.error(`Failed to login with bot token: ${err.message}`);
+    logger.error(`Failed to initialize bot: ${err.message}`);
     process.exit(1);
   }
 })();
