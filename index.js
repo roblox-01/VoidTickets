@@ -3,7 +3,7 @@ const fs = require('fs').promises;
 const winston = require('winston');
 const { setTimeout } = require('timers/promises');
 
-// Initialize logger first
+// Initialize logger
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -19,9 +19,9 @@ const logger = winston.createLogger({
 const CONFIG_FILE = 'config.json';
 const startTime = Date.now();
 
-function loadConfig() {
+async function loadConfig() {
   try {
-    const data = fs.readFileSync(CONFIG_FILE, 'utf8');
+    const data = await fs.readFile(CONFIG_FILE, 'utf8');
     const configData = JSON.parse(data);
     for (const guildId of Object.keys(configData)) {
       if (!configData[guildId].panelChannelId || !configData[guildId].staffRoleId) {
@@ -36,12 +36,9 @@ function loadConfig() {
   }
 }
 
-// Load config after logger initialization
-let config = loadConfig();
-
-async function saveConfig() {
+async function saveConfig(configData) {
   try {
-    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+    await fs.writeFile(CONFIG_FILE, JSON.stringify(configData, null, 2), 'utf8');
     logger.info(`Configuration saved to ${CONFIG_FILE}`);
   } catch (err) {
     logger.error(`Error saving ${CONFIG_FILE}: ${err.message}`);
@@ -57,6 +54,12 @@ const client = new Client({
 });
 
 const activeTickets = new Map();
+
+// Load config after logger initialization
+let config;
+(async () => {
+  config = await loadConfig();
+})();
 
 // ---------- Auto Panel Creation / Management ----------
 async function sendOrUpdatePanel(guildId) {
@@ -83,7 +86,7 @@ async function sendOrUpdatePanel(guildId) {
     let panelChannel;
     let retryCount = 0;
     const maxRetries = 3;
-    const retryDelay = 5000;
+    const baseRetryDelay = 5000;
 
     while (!panelChannel && retryCount < maxRetries) {
       try {
@@ -99,8 +102,9 @@ async function sendOrUpdatePanel(guildId) {
       if (!panelChannel) {
         retryCount++;
         if (retryCount < maxRetries) {
-          logger.info(`Retrying channel fetch in ${retryDelay / 1000} seconds...`);
-          await setTimeout(retryDelay);
+          const delay = baseRetryDelay * Math.pow(2, retryCount); // Exponential backoff
+          logger.info(`Retrying channel fetch in ${delay / 1000} seconds...`);
+          await setTimeout(delay);
         }
       }
     }
@@ -112,11 +116,11 @@ async function sendOrUpdatePanel(guildId) {
           type: 'GUILD_TEXT',
           permissionOverwrites: [
             { id: guild.id, deny: ['SEND_MESSAGES'], allow: ['VIEW_CHANNEL'] },
-            { id: client.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES', 'EMBED_LINKS', 'MANAGE_MESSAGES'] }
+            { id: client.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES', 'EMBED_LINKS', 'MANAGE_MESSAGES', 'MANAGE_CHANNELS'] }
           ]
         });
         guildConfig.panelChannelId = panelChannel.id;
-        await saveConfig();
+        await saveConfig(config);
         logger.info(`Created new panel channel ${panelChannel.id} for guild ${guildId}`);
         if (guildConfig.logChannelId) {
           const logChannel = await client.channels.fetch(guildConfig.logChannelId).catch(() => null);
@@ -143,7 +147,7 @@ async function sendOrUpdatePanel(guildId) {
     });
     if (!botMember) return;
 
-    const requiredPermissions = ['VIEW_CHANNEL', 'SEND_MESSAGES', 'EMBED_LINKS'];
+    const requiredPermissions = ['VIEW_CHANNEL', 'SEND_MESSAGES', 'EMBED_LINKS', 'MANAGE_MESSAGES'];
     const permissions = panelChannel.permissionsFor(botMember);
     const missingPermissions = requiredPermissions.filter(perm => !permissions.has(perm));
     if (missingPermissions.length > 0) {
@@ -180,7 +184,7 @@ async function sendOrUpdatePanel(guildId) {
       .addField('Active Tickets', activeTickets.size.toString(), true)
       .setColor('#00BFFF')
       .setAuthor({ name: guild.name, iconURL: guild.iconURL() || client.user.displayAvatarURL() })
-      .setThumbnail(client.user.displayAvatarURL())
+      .setThumbnail(guild.iconURL() || client.user.displayAvatarURL())
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
 
@@ -205,7 +209,7 @@ async function sendOrUpdatePanel(guildId) {
       });
       if (message) {
         guildConfig.panelMessageId = message.id;
-        await saveConfig();
+        await saveConfig(config);
         logger.info(`Panel created in guild ${guildId} in channel ${panelChannel.id}`);
       }
     } else {
@@ -222,8 +226,10 @@ async function sendOrUpdatePanel(guildId) {
       .setDescription(`Void Tickets is ready to assist in ${guild.name}! Use the buttons below to open a ticket or view the FAQ.`)
       .addField('Uptime', `${Math.floor(uptime / 60)}m ${uptime % 60}s`, true)
       .addField('Version', '1.0.0', true)
+      .addField('Guild', guild.name, true)
       .setColor('#00BFFF')
-      .setThumbnail(client.user.displayAvatarURL())
+      .setThumbnail(guild.iconURL() || client.user.displayAvatarURL())
+      .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
     await panelChannel.send({ embeds: [welcomeEmbed] }).catch(err => {
       logger.error(`Failed to send welcome message in channel ${panelChannel.id}: ${err.message}`);
@@ -236,6 +242,14 @@ async function sendOrUpdatePanel(guildId) {
 // ---------- Bot Ready ----------
 client.once('ready', async () => {
   logger.info(`🚀 Logged in as ${client.user.tag}!`);
+  // Validate intents
+  const requiredIntents = ['GUILDS', 'GUILD_MESSAGES', 'GUILD_MESSAGE_REACTIONS'];
+  const missingIntents = requiredIntents.filter(intent => !client.options.intents.has(intent));
+  if (missingIntents.length > 0) {
+    logger.error(`Missing required intents: ${missingIntents.join(', ')}`);
+    process.exit(1);
+  }
+
   // Register slash commands
   const commands = [
     {
@@ -251,6 +265,11 @@ client.once('ready', async () => {
     {
       name: 'status',
       description: 'Show bot status and statistics (staff only)',
+      defaultPermission: false
+    },
+    {
+      name: 'reset-panel',
+      description: 'Reset and recreate the panel channel (staff only)',
       defaultPermission: false
     }
   ];
@@ -286,7 +305,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'reload-config') {
-      config = loadConfig();
+      config = await loadConfig();
       await sendOrUpdatePanel(interaction.guild.id);
       await interaction.reply({ content: '✅ Configuration reloaded!', ephemeral: true });
       logger.info(`Config reloaded by ${interaction.user.tag} in guild ${interaction.guild.id}`);
@@ -307,7 +326,7 @@ client.on('interactionCreate', async interaction => {
         .addField('Bot Permissions', missingPermissions.length === 0 ? '✅ All present' : `❌ Missing: ${missingPermissions.join(', ')}`, true)
         .addField('Staff Role', `<@&${guildConfig.staffRoleId}>`, true)
         .setColor('#FFD700')
-        .setThumbnail(client.user.displayAvatarURL())
+        .setThumbnail(guild.iconURL() || client.user.displayAvatarURL())
         .setTimestamp();
       await interaction.reply({ embeds: [embed], ephemeral: true });
       logger.info(`Diagnosis run by ${interaction.user.tag} in guild ${guild.id}`);
@@ -321,10 +340,29 @@ client.on('interactionCreate', async interaction => {
         .addField('Guild', interaction.guild.name, true)
         .addField('Version', '1.0.0', true)
         .setColor('#00BFFF')
-        .setThumbnail(client.user.displayAvatarURL())
+        .setThumbnail(guild.iconURL() || client.user.displayAvatarURL())
         .setTimestamp();
       await interaction.reply({ embeds: [embed], ephemeral: true });
       logger.info(`Status checked by ${interaction.user.tag} in guild ${interaction.guild.id}`);
+    } else if (interaction.commandName === 'reset-panel') {
+      try {
+        const newChannel = await interaction.guild.channels.create('void-tickets-panel', {
+          type: 'GUILD_TEXT',
+          permissionOverwrites: [
+            { id: interaction.guild.id, deny: ['SEND_MESSAGES'], allow: ['VIEW_CHANNEL'] },
+            { id: client.user.id, allow: ['VIEW_CHANNEL', 'SEND_MESSAGES', 'EMBED_LINKS', 'MANAGE_MESSAGES', 'MANAGE_CHANNELS'] }
+          ]
+        });
+        guildConfig.panelChannelId = newChannel.id;
+        delete guildConfig.panelMessageId; // Clear old message ID
+        await saveConfig(config);
+        await sendOrUpdatePanel(interaction.guild.id);
+        await interaction.reply({ content: `✅ Panel channel reset to <#${newChannel.id}>`, ephemeral: true });
+        logger.info(`Panel channel reset to ${newChannel.id} by ${interaction.user.tag} in guild ${interaction.guild.id}`);
+      } catch (err) {
+        await interaction.reply({ content: `❌ Failed to reset panel channel: ${err.message}`, ephemeral: true });
+        logger.error(`Failed to reset panel channel in guild ${interaction.guild.id}: ${err.message}`);
+      }
     }
     return;
   }
@@ -400,7 +438,7 @@ client.on('interactionCreate', async interaction => {
       .addField('Status', '🟢 Open', true)
       .setColor('#00BFFF')
       .setAuthor({ name: interaction.guild.name, iconURL: interaction.guild.iconURL() || client.user.displayAvatarURL() })
-      .setThumbnail(client.user.displayAvatarURL())
+      .setThumbnail(interaction.guild.iconURL() || client.user.displayAvatarURL())
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
 
@@ -427,7 +465,7 @@ client.on('interactionCreate', async interaction => {
       .setTitle('❓ Void Tickets FAQ')
       .setDescription('**Common Questions**\n- **Response Time?** Usually within minutes.\n- **Reopen Ticket?** Create a new one.\n- **Transcripts?** Available via the Transcript button.')
       .setColor('#FFD700')
-      .setThumbnail(client.user.displayAvatarURL())
+      .setThumbnail(interaction.guild.iconURL() || client.user.displayAvatarURL())
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
     await interaction.reply({ embeds: [embed], ephemeral: true });
@@ -450,7 +488,7 @@ client.on('interactionCreate', async interaction => {
       .setTitle('🔒 Ticket Closing')
       .setDescription('This ticket will close in 10 seconds. Transcript attached.')
       .setColor('#FF4500')
-      .setThumbnail(client.user.displayAvatarURL())
+      .setThumbnail(interaction.guild.iconURL() || client.user.displayAvatarURL())
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
     await interaction.followUp({ embeds: [embed], files: [transcriptPath] });
@@ -504,7 +542,7 @@ client.on('interactionCreate', async interaction => {
       .setTitle('📢 Call Management')
       .setDescription('Select a management role to request assistance.')
       .setColor('#00BFFF')
-      .setThumbnail(client.user.displayAvatarURL())
+      .setThumbnail(interaction.guild.iconURL() || client.user.displayAvatarURL())
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
     await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
@@ -518,7 +556,7 @@ client.on('interactionCreate', async interaction => {
       .setTitle('📜 Ticket Transcript')
       .setDescription('Here is the current transcript of this ticket.')
       .setColor('#FFD700')
-      .setThumbnail(client.user.displayAvatarURL())
+      .setThumbnail(interaction.guild.iconURL() || client.user.displayAvatarURL())
       .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
       .setTimestamp();
     await interaction.followUp({ embeds: [embed], files: [transcriptPath], ephemeral: true });
@@ -563,7 +601,7 @@ const autocloseTickets = {
             .setTitle('🔒 Ticket Auto-Closed')
             .setDescription('This ticket has been closed due to inactivity.')
             .setColor('#FF4500')
-            .setThumbnail(client.user.displayAvatarURL())
+            .setThumbnail(channel.guild.iconURL() || client.user.displayAvatarURL())
             .setFooter({ text: 'Void Tickets | Powered by xAI', iconURL: client.user.displayAvatarURL() })
             .setTimestamp();
           await channel.send({ embeds: [embed], files: [transcriptPath] });
@@ -628,13 +666,18 @@ async function generateHtmlTranscript(channel) {
 }
 
 // ---------- Login ----------
-const firstGuildId = Object.keys(config)[0];
-if (firstGuildId && config[firstGuildId].botToken) {
-  client.login(config[firstGuildId].botToken).catch(err => {
+(async () => {
+  try {
+    await config; // Ensure config is loaded
+    const firstGuildId = Object.keys(config)[0];
+    if (firstGuildId && config[firstGuildId].botToken) {
+      await client.login(config[firstGuildId].botToken);
+    } else {
+      logger.error('No valid bot token found in config. Please run "npm run setup" first.');
+      process.exit(1);
+    }
+  } catch (err) {
     logger.error(`Failed to login with bot token: ${err.message}`);
     process.exit(1);
-  });
-} else {
-  logger.error('No valid bot token found in config. Please run "npm run setup" first.');
-  process.exit(1);
-}
+  }
+})();
